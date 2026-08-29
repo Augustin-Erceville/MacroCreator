@@ -482,8 +482,19 @@ def _require_button(action):
         )
 
 
-def check_coordinates(actions, screen_width, screen_height):
-    """Retourne la liste des descriptions d'actions hors écran."""
+def check_coordinates(actions, screens):
+    """Retourne la liste des descriptions d'actions situées hors écran.
+
+    `screens` est la liste des zones d'affichage, chacune sous la forme
+    (gauche, haut, droite, bas) avec droite et bas exclus. En multi-écran,
+    l'origine (0, 0) est le coin de l'écran principal : un écran placé à
+    gauche ou au-dessus a donc des coordonnées négatives, ce qui est
+    parfaitement valide. Une action n'est signalée que si elle ne tombe
+    dans aucun des écrans.
+    """
+
+    if not screens:
+        return []
 
     problems = []
 
@@ -493,8 +504,7 @@ def check_coordinates(actions, screen_width, screen_height):
 
             problems += check_coordinates(
                 action.get("actions", []),
-                screen_width,
-                screen_height,
+                screens,
             )
 
             continue
@@ -509,13 +519,23 @@ def check_coordinates(actions, screen_width, screen_height):
 
         for x, y in points:
 
-            if not (0 <= x < screen_width and 0 <= y < screen_height):
+            if not point_on_any_screen(x, y, screens):
 
                 problems.append(describe_action(action, index))
 
                 break
 
     return problems
+
+
+def point_on_any_screen(x, y, screens):
+
+    for left, top, right, bottom in screens:
+
+        if left <= x < right and top <= y < bottom:
+            return True
+
+    return False
 
 
 # ==============================================================

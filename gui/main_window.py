@@ -4,9 +4,8 @@ import copy
 import os
 import threading
 
-import pyautogui
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QFileDialog,
     QGroupBox,
@@ -31,6 +30,86 @@ APPLICATION_NAME = "Macro Creator"
 
 # Délai par défaut avant le démarrage d'une macro (secondes)
 DEFAULT_START_DELAY = 3
+
+
+# ==============================================================
+# ECRANS
+# ==============================================================
+
+def screen_areas(physical=True):
+    """Zones d'affichage des écrans : (gauche, haut, droite, bas).
+
+    Droite et bas sont exclus. Les valeurs peuvent être négatives : sous
+    Windows, l'origine (0, 0) est le coin haut-gauche de l'écran principal,
+    et un écran placé à sa gauche ou au-dessus occupe donc des coordonnées
+    négatives.
+
+    Qt raisonne en pixels logiques ; PyAutoGUI, comme les coordonnées
+    enregistrées dans les macros, raisonne en pixels physiques. Avec
+    `physical=True`, la géométrie est convertie selon la mise à l'échelle
+    de chaque écran (125 %, 150 %...).
+    """
+
+    areas = []
+
+    for screen in QGuiApplication.screens():
+
+        geometry = screen.geometry()
+
+        ratio = screen.devicePixelRatio() if physical else 1.0
+
+        areas.append((
+            round(geometry.left() * ratio),
+            round(geometry.top() * ratio),
+            round((geometry.left() + geometry.width()) * ratio),
+            round((geometry.top() + geometry.height()) * ratio),
+        ))
+
+    return areas
+
+
+def check_areas():
+    """Zones acceptées pour la vérification des coordonnées.
+
+    On retient les deux interprétations (logique et physique) : en cas de
+    mise à l'échelle différente d'un écran à l'autre, la conversion n'est
+    qu'approximative, et mieux vaut un avertissement trop permissif qu'une
+    alerte injustifiée sur des coordonnées parfaitement valides.
+    """
+
+    areas = screen_areas(physical=True)
+
+    for area in screen_areas(physical=False):
+
+        if area not in areas:
+            areas.append(area)
+
+    return areas
+
+
+def describe_screens(screens=None):
+    """Phrase décrivant la disposition des écrans."""
+
+    screens = screen_areas() if screens is None else screens
+
+    if not screens:
+        return "Aucun écran détecté."
+
+    if len(screens) == 1:
+
+        left, top, right, bottom = screens[0]
+
+        return (
+            f"Écran unique : {right - left} × {bottom - top} pixels, "
+            f"origine X:{left} Y:{top}."
+        )
+
+    details = ", ".join(
+        f"{right - left}×{bottom - top} en X:{left} Y:{top}"
+        for left, top, right, bottom in screens
+    )
+
+    return f"{len(screens)} écrans détectés : {details}."
 
 
 class MainWindow(QMainWindow):
@@ -1058,15 +1137,16 @@ class MainWindow(QMainWindow):
         self._start_worker()
 
     def check_screen_coordinates(self):
-        """Prévient si des actions visent un point hors de l'écran."""
+        """Prévient si des actions visent un point hors de tout écran.
 
-        try:
-            width, height = pyautogui.size()
+        En multi-écran, les coordonnées négatives sont normales : l'origine
+        est le coin haut-gauche de l'écran principal, et un écran situé à
+        gauche ou au-dessus se trouve donc en négatif. On vérifie donc
+        l'appartenance à l'un quelconque des écrans, pas à un rectangle
+        unique.
+        """
 
-        except Exception:  # noqa: BLE001 - taille d'écran indisponible
-            return True
-
-        problems = macro.check_coordinates(self.actions, width, height)
+        problems = macro.check_coordinates(self.actions, check_areas())
 
         if not problems:
             return True
@@ -1079,9 +1159,9 @@ class MainWindow(QMainWindow):
         answer = QMessageBox.warning(
             self,
             "Coordonnées hors écran",
-            f"L'écran mesure {width} × {height} pixels, mais certaines "
-            "actions visent un point situé en dehors :\n\n"
-            f"{preview}\n\nExécuter quand même ?",
+            f"{describe_screens()}\n\n"
+            "Ces actions visent un point situé en dehors de tous les "
+            f"écrans :\n\n{preview}\n\nExécuter quand même ?",
             QMessageBox.StandardButton.Yes
             | QMessageBox.StandardButton.No,
         )
@@ -1234,6 +1314,7 @@ class MainWindow(QMainWindow):
             "dans le coin haut-gauche de l'écran.<br>"
             "Capture de position : <b>F8</b>.<br>"
             "Arrêt de l'enregistrement : <b>F9</b>.<br><br>"
+            f"{describe_screens()}<br><br>"
             f"Les macros sont enregistrées dans :<br>{macro.DATA_DIR}"
         )
 

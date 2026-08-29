@@ -97,6 +97,17 @@ gui/dialogs.py        dialogues d'ajout et de modification d'actions
 data/                 macros enregistrées
 ```
 
+## Multi-écran
+
+Les coordonnées sont exprimées dans l'espace virtuel de Windows : l'origine
+(0, 0) est le coin haut-gauche de l'**écran principal**. Un écran situé à sa
+gauche ou au-dessus occupe donc des coordonnées **négatives**, ce qui est
+normal et pleinement supporté (champs X/Y de -20000 à 20000).
+
+L'avertissement « coordonnées hors écran » ne se déclenche que si un point
+ne tombe dans **aucun** des écrans détectés ; le menu « Aide › À propos »
+affiche la disposition vue par l'application.
+
 ## Limites connues
 
 - La saisie de texte simulée dépend de la disposition clavier active ; les
