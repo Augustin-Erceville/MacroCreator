@@ -13,9 +13,47 @@ pip install -r requirements.txt
 
 ## Lancement
 
+Deux possibilités.
+
+### 1. L'exécutable (le plus simple)
+
+Double-cliquez sur **`dist\Macro Creator.exe`**. Aucune installation, aucun
+Python requis : tout est embarqué dans le fichier. La fenêtre s'ouvre en
+2 à 3 secondes.
+
+Vous pouvez déplacer cet exécutable où vous voulez (bureau, clé USB...) ;
+il crée alors un dossier `data\` à côté de lui pour vos macros. S'il est
+placé dans un dossier protégé en écriture, les macros vont dans
+`Documents\Macro Creator\`.
+
+### 2. Depuis les sources
+
 ```bash
 python main.py
 ```
+
+## Reconstruire l'exécutable
+
+Après une modification du code, double-cliquez sur **`build.bat`** (ou
+lancez-le en terminal). Le script installe PyInstaller si besoin, régénère
+l'icône et reconstruit `dist\Macro Creator.exe` — comptez une à deux
+minutes.
+
+Pour vérifier qu'un build est sain, `tools\selftest_frozen.py` contrôle les
+points qui cassent typiquement une fois l'application figée (backends
+pynput, dossier des macros, détection des écrans) :
+
+```bash
+python tools/selftest_frozen.py
+```
+
+### À savoir sur l'exécutable
+
+- Il pèse ~45 Mo : Python, Qt et les bibliothèques y sont inclus.
+- Windows SmartScreen ou l'antivirus peuvent le signaler au premier
+  lancement : il n'est pas signé numériquement, et il surveille le clavier
+  et la souris — deux comportements que les antivirus regardent de près.
+  « Informations complémentaires » puis « Exécuter quand même ».
 
 ## Raccourcis
 
@@ -88,6 +126,10 @@ inconnue produit un message d'erreur au lieu d'un plantage.
 
 ```
 main.py               point d'entrée
+build.bat             construit l'exécutable
+macro_creator.spec    recette PyInstaller
+assets/icon.ico       icône de l'application
+tools/                génération de l'icône, auto-test d'un build
 core/macro.py         modèle, validation, description, lecture/écriture JSON
 core/executor.py      exécution des actions dans un thread interruptible
 core/recorder.py      enregistrement temps réel (pynput)

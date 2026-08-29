@@ -18,6 +18,7 @@ import copy
 import json
 import os
 import re
+import sys
 
 # ==============================================================
 # CONSTANTES
@@ -27,14 +28,30 @@ FORMAT_NAME = "macro-creator"
 FORMAT_VERSION = 1
 FILE_EXTENSION = ".json"
 
-# Dossier de stockage des macros (data/ à la racine du projet)
-DATA_DIR = os.path.join(
-    os.path.dirname(
-        os.path.dirname(
-            os.path.abspath(__file__)
-        )
-    ),
-    "data"
+
+def base_dir():
+    """Dossier de référence de l'application.
+
+    En exécutable PyInstaller, `__file__` pointe vers le dossier temporaire
+    d'extraction, effacé à la fermeture : on se base alors sur l'emplacement
+    de l'exécutable lui-même.
+    """
+
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+# Dossier de stockage des macros (à côté de l'exécutable ou du projet)
+DATA_DIR = os.path.join(base_dir(), "data")
+
+# Emplacement de repli si le dossier de l'application n'est pas accessible
+# en écriture (exécutable placé dans « Program Files », par exemple).
+FALLBACK_DATA_DIR = os.path.join(
+    os.path.expanduser("~"),
+    "Documents",
+    "Macro Creator",
 )
 
 ACTION_TYPES = (
@@ -543,9 +560,35 @@ def point_on_any_screen(x, y, screens):
 # ==============================================================
 
 def ensure_data_dir():
+    """Crée le dossier des macros et vérifie qu'il est accessible en écriture.
 
-    os.makedirs(DATA_DIR, exist_ok=True)
+    Bascule sur « Documents/Macro Creator » si ce n'est pas le cas.
+    """
 
+    global DATA_DIR
+
+    for candidate in (DATA_DIR, FALLBACK_DATA_DIR):
+
+        try:
+
+            os.makedirs(candidate, exist_ok=True)
+
+            probe = os.path.join(candidate, ".ecriture")
+
+            with open(probe, "w", encoding="utf-8"):
+                pass
+
+            os.remove(probe)
+
+        except OSError:
+            continue
+
+        DATA_DIR = candidate
+
+        return DATA_DIR
+
+    # Dernier recours : on garde le dossier prévu, l'erreur éventuelle sera
+    # signalée à l'enregistrement.
     return DATA_DIR
 
 
