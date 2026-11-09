@@ -79,16 +79,53 @@ Deux façons de construire une macro :
 2. **Action par action** — chaque bouton du panneau de gauche ouvre une
    boîte de dialogue.
 
-Le point d'insertion suit la sélection :
+### Le canevas de blocs
 
-- aucune sélection → l'action est ajoutée à la fin ;
-- une action sélectionnée → l'action est insérée juste après ;
-- une **boucle** sélectionnée → l'action est ajoutée **à l'intérieur** de la
-  boucle.
+La macro s'affiche comme un enchaînement de blocs reliés verticalement.
 
-Les boucles s'affichent sous forme d'arborescence et peuvent être
-imbriquées. « Grouper en boucle » transforme une sélection d'actions
-consécutives en boucle, « Dégrouper » fait l'inverse.
+- Le bouton **« + »** entre deux blocs insère une action **exactement à cet
+  endroit** : il ouvre la palette des blocs disponibles.
+- Un bloc de la colonne de gauche s'ajoute **après le bloc sélectionné**,
+  ou à la fin si rien n'est sélectionné.
+- **Ctrl+clic** sélectionne plusieurs blocs ; « Grouper en boucle »
+  transforme une suite de blocs consécutifs en boucle, « Dégrouper » fait
+  l'inverse.
+- Les boucles et les conditions affichent leur contenu en retrait et
+  peuvent être imbriquées sans limite de profondeur.
+
+### Conditions
+
+Un bloc **Condition** sépare le flux en deux branches : **Alors** si le
+test est vrai, **Sinon** dans le cas contraire. Chaque branche se remplit
+avec son propre bouton « + ». Quatre tests sont disponibles :
+
+| Test | Description |
+|---|---|
+| Couleur d'un pixel | Compare la couleur en X/Y à une couleur de référence, avec tolérance. Le bouton « Lire la couleur » capture la couleur actuelle. |
+| Image visible | Cherche une image à l'écran (correspondance exacte de pixels). |
+| Titre de la fenêtre active | Contient, ou est exactement, un texte donné. |
+| Probabilité | Vrai avec le pourcentage de chances indiqué. |
+
+Chaque test peut être **inversé** d'une case à cocher. Un test qui échoue
+pour une raison technique (image introuvable, capture impossible) est
+considéré comme faux et n'interrompt pas la macro.
+
+### Suivi de l'exécution
+
+Pendant l'exécution, le bloc en cours est **encadré en vert** dans le
+canevas, qui défile automatiquement jusqu'à lui. Le bandeau du bas affiche
+l'action en cours, la progression (`action 7 / 18`) et, lorsqu'il s'agit
+d'une attente, le **temps restant avant l'action suivante**, décompté dix
+fois par seconde.
+
+Quand la macro contient une condition, le compteur est précédé de « ≈ » :
+la branche empruntée n'étant connue qu'à l'exécution, le total n'est
+qu'une estimation.
+
+### Thème
+
+Le menu **Affichage** bascule entre thème sombre et thème clair ; le choix
+est mémorisé.
 
 ## Types d'actions
 
@@ -102,6 +139,7 @@ consécutives en boucle, « Dégrouper » fait l'inverse.
 | Texte | Saisie d'une chaîne, délai réglable entre les caractères |
 | Touche | Touche unique avec modificateurs (CTRL, SHIFT, ALT, Windows) |
 | Boucle | Répète un groupe d'actions, imbrication possible |
+| Condition | Sépare le flux en deux branches selon un test |
 
 ## Format de fichier
 
@@ -116,6 +154,23 @@ Les macros sont enregistrées en JSON dans `data/` :
     { "type": "wait", "duration": 1.0 },
     { "type": "click", "x": 100, "y": 200, "button": "left", "clicks": 1 }
   ]
+}
+```
+
+Une condition contient son test et ses deux branches :
+
+```json
+{
+  "type": "condition",
+  "test": {
+    "kind": "pixel",
+    "x": 960, "y": 540,
+    "color": [237, 66, 69],
+    "tolerance": 15,
+    "negate": false
+  },
+  "then": [ { "type": "key", "key": "enter", "modifiers": [] } ],
+  "else": []
 }
 ```
 
@@ -134,7 +189,10 @@ core/macro.py         modèle, validation, description, lecture/écriture JSON
 core/executor.py      exécution des actions dans un thread interruptible
 core/recorder.py      enregistrement temps réel (pynput)
 core/hotkeys.py       raccourci global d'arrêt d'urgence
+core/conditions.py    évaluation des tests de condition
 gui/main_window.py    fenêtre principale
+gui/flow.py           canevas de blocs reliés
+gui/theme.py          palettes, feuille de style et pictogrammes
 gui/dialogs.py        dialogues d'ajout et de modification d'actions
 data/                 macros enregistrées
 ```
@@ -156,5 +214,9 @@ affiche la disposition vue par l'application.
   caractères absents du clavier ne sont pas tapés.
 - L'enregistrement des mouvements de souris est échantillonné (une position
   toutes les 150 ms) pour éviter de produire des milliers d'actions.
-- Pas de reconnaissance d'image (« cliquer quand tel élément apparaît ») :
-  cela demanderait OpenCV.
+- La recherche d'image des conditions exige une correspondance exacte de
+  pixels : une capture redimensionnée ou un thème différent la fera
+  échouer. Installer OpenCV (`pip install opencv-python`) permettrait une
+  recherche tolérante.
+- La progression affichée est approximative dès qu'une condition est
+  présente, les deux branches n'ayant pas la même longueur.

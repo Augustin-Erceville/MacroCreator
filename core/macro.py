@@ -63,7 +63,17 @@ ACTION_TYPES = (
     "text",
     "key",
     "loop",
+    "condition",
 )
+
+# Types d'actions qui contiennent d'autres actions
+CONTAINER_TYPES = ("loop", "condition")
+
+# Branches d'une condition
+BRANCHES = ("then", "else")
+
+# Natures de test disponibles pour une condition
+TEST_KINDS = ("pixel", "image", "window", "chance")
 
 MOUSE_BUTTONS = ("left", "right", "middle")
 
@@ -138,6 +148,49 @@ BUTTON_NAMES = {
     "left": "gauche",
     "right": "droit",
     "middle": "milieu",
+}
+
+# Pictogramme et nom court de chaque type d'action
+ACTION_ICONS = {
+    "wait": "⏱",
+    "move": "🖱",
+    "click": "🖱",
+    "drag": "🖱",
+    "scroll": "🖱",
+    "text": "⌨",
+    "key": "⌨",
+    "loop": "🔁",
+    "condition": "🔀",
+}
+
+ACTION_LABELS = {
+    "wait": "Attente",
+    "move": "Mouvement",
+    "click": "Clic",
+    "drag": "Glisser",
+    "scroll": "Molette",
+    "text": "Texte",
+    "key": "Touche",
+    "loop": "Boucle",
+    "condition": "Condition",
+}
+
+# Phrase affichée sous le titre de chaque bloc de la palette
+ACTION_SUMMARIES = {
+    "wait": "Marquer une pause, fixe ou aléatoire",
+    "move": "Déplacer le curseur vers un point",
+    "click": "Cliquer à une position donnée",
+    "drag": "Maintenir et déplacer d'un point à un autre",
+    "scroll": "Faire défiler avec la molette",
+    "text": "Taper du texte au clavier",
+    "key": "Appuyer sur une touche ou un raccourci",
+    "loop": "Répéter un groupe d'actions",
+    "condition": "Exécuter selon qu'un test est vrai ou faux",
+}
+
+BRANCH_LABELS = {
+    "then": "Alors",
+    "else": "Sinon",
 }
 
 
@@ -229,6 +282,62 @@ def make_loop(repetitions, actions=None):
     }
 
 
+# --- Tests de condition ---------------------------------------
+
+def make_pixel_test(x, y, color, tolerance=10, negate=False):
+    """Vrai si le pixel en (x, y) a la couleur indiquée, à tolérance près."""
+
+    return {
+        "kind": "pixel",
+        "x": int(x),
+        "y": int(y),
+        "color": [int(channel) for channel in color],
+        "tolerance": int(tolerance),
+        "negate": bool(negate),
+    }
+
+
+def make_image_test(path, negate=False):
+    """Vrai si l'image du fichier est visible quelque part à l'écran."""
+
+    return {
+        "kind": "image",
+        "path": str(path),
+        "negate": bool(negate),
+    }
+
+
+def make_window_test(text, mode="contains", negate=False):
+    """Vrai selon le titre de la fenêtre active."""
+
+    return {
+        "kind": "window",
+        "text": str(text),
+        "mode": mode,
+        "negate": bool(negate),
+    }
+
+
+def make_chance_test(percent, negate=False):
+    """Vrai avec la probabilité indiquée."""
+
+    return {
+        "kind": "chance",
+        "percent": int(percent),
+        "negate": bool(negate),
+    }
+
+
+def make_condition(test=None, then_actions=None, else_actions=None):
+
+    return {
+        "type": "condition",
+        "test": test or make_chance_test(50),
+        "then": list(then_actions or []),
+        "else": list(else_actions or []),
+    }
+
+
 def new_macro(name="Nouvelle macro"):
     return {
         "format": FORMAT_NAME,
@@ -242,33 +351,108 @@ def new_macro(name="Nouvelle macro"):
 # NAVIGATION DANS L'ARBRE D'ACTIONS
 # ==============================================================
 
+def children(action, branch=None):
+    """Liste d'actions contenue dans un bloc, ou None s'il n'en contient pas.
+
+    Une boucle n'a qu'un contenu ; une condition en a deux, désignés par
+    `branch` (« then » ou « else »).
+    """
+
+    action_type = action.get("type")
+
+    if action_type == "loop":
+        return action.setdefault("actions", [])
+
+    if action_type == "condition":
+
+        if branch not in BRANCHES:
+            branch = "then"
+
+        return action.setdefault(branch, [])
+
+    return None
+
+
+def get_branch(actions, path):
+    """Retourne la liste d'actions désignée par un chemin de branche.
+
+    Le chemin se termine alors par un nom de branche ou désigne une boucle :
+    [2] pour le contenu de la boucle n° 3, [2, "else"] pour le « sinon » de
+    la condition n° 3. Un chemin vide désigne la racine.
+    """
+
+    if not path:
+        return actions
+
+    branch = None
+
+    if isinstance(path[-1], str):
+        branch = path[-1]
+        path = path[:-1]
+
+    container, index = get_container(actions, path)
+
+    inner = children(container[index], branch)
+
+    if inner is None:
+        raise MacroError("Cette action ne contient pas d'autres actions.")
+
+    return inner
+
+
 def get_container(actions, path):
     """Retourne (liste_parente, index) pour un chemin d'action.
 
-    Un chemin est une suite d'indices : [2] désigne la 3e action de la
-    racine, [2, 0] la 1re action de la boucle située en 3e position.
+    Un chemin est une suite d'indices, éventuellement entrecoupée de noms
+    de branche : [2] désigne la 3e action de la racine, [2, 0] la 1re
+    action de la boucle située en 3e position, et [2, "else", 0] la 1re
+    action du « sinon » de la condition située en 3e position.
     """
 
     if not path:
         raise MacroError("Chemin d'action vide.")
 
+    if isinstance(path[-1], str):
+        raise MacroError("Un chemin d'action ne peut pas finir par une branche.")
+
     container = actions
 
-    for step in path[:-1]:
+    position = 0
 
-        parent = container[step]
+    while position < len(path):
 
-        if parent.get("type") != "loop":
+        token = path[position]
+
+        if isinstance(token, str):
             raise MacroError("Chemin d'action invalide.")
 
-        container = parent["actions"]
+        if token < 0 or token >= len(container):
+            raise MacroError("Chemin d'action hors limites.")
 
-    index = path[-1]
+        # Dernier élément : on a trouvé la liste parente et l'index.
+        if position == len(path) - 1:
+            return container, token
 
-    if index < 0 or index >= len(container):
-        raise MacroError("Chemin d'action hors limites.")
+        parent = container[token]
 
-    return container, index
+        branch = None
+
+        if isinstance(path[position + 1], str):
+
+            branch = path[position + 1]
+
+            position += 1
+
+        inner = children(parent, branch)
+
+        if inner is None:
+            raise MacroError("Chemin d'action invalide.")
+
+        container = inner
+
+        position += 1
+
+    raise MacroError("Chemin d'action invalide.")
 
 
 def get_action(actions, path):
@@ -278,7 +462,7 @@ def get_action(actions, path):
 
 
 def count_actions(actions):
-    """Nombre total d'actions, boucles imbriquées comprises."""
+    """Nombre total d'actions, blocs imbriqués compris."""
 
     total = 0
 
@@ -289,17 +473,93 @@ def count_actions(actions):
         if action.get("type") == "loop":
             total += count_actions(action.get("actions", []))
 
+        elif action.get("type") == "condition":
+
+            total += count_actions(action.get("then", []))
+            total += count_actions(action.get("else", []))
+
     return total
+
+
+def count_steps(actions):
+    """Estimation du nombre d'actions réellement exécutées.
+
+    Une boucle ne compte pas pour elle-même : seuls comptent les passages
+    de son contenu. Pour une condition, la branche empruntée n'est connue
+    qu'à l'exécution : on retient la plus longue, l'estimation sert
+    uniquement à la barre de progression.
+    """
+
+    total = 0
+
+    for action in actions:
+
+        action_type = action.get("type")
+
+        if action_type == "loop":
+
+            total += (
+                action.get("repetitions", 1)
+                * count_steps(action.get("actions", []))
+            )
+
+        elif action_type == "condition":
+
+            total += 1 + max(
+                count_steps(action.get("then", [])),
+                count_steps(action.get("else", [])),
+            )
+
+        else:
+            total += 1
+
+    return total
+
+
+def has_conditions(actions):
+    """Indique si la macro comporte une condition (progression estimée)."""
+
+    for action in actions:
+
+        action_type = action.get("type")
+
+        if action_type == "condition":
+            return True
+
+        if action_type == "loop":
+
+            if has_conditions(action.get("actions", [])):
+                return True
+
+    return False
 
 
 # ==============================================================
 # DESCRIPTION
 # ==============================================================
 
-def describe_action(action, number=None):
-    """Texte affiché dans la liste pour une action."""
+def describe_action(action, number=None, icon=True):
+    """Texte affiché dans la liste pour une action.
 
-    prefix = "" if number is None else f"{number}. "
+    `icon=False` omet le pictogramme : l'interface affiche alors sa propre
+    pastille de couleur à la place.
+    """
+
+    parts = []
+
+    if number is not None:
+        parts.append(f"{number}.")
+
+    if icon:
+        parts.append(ACTION_ICONS.get(action.get("type"), "•"))
+
+    parts.append(action_body(action))
+
+    return " ".join(parts)
+
+
+def action_body(action):
+    """Description d'une action, sans numéro ni pictogramme."""
 
     action_type = action.get("type")
 
@@ -308,18 +568,16 @@ def describe_action(action, number=None):
         if action.get("duration_max"):
 
             return (
-                f"{prefix}⏱ Attendre entre "
-                f"{action['duration']:.2f}s et "
+                f"Attendre entre {action['duration']:.2f}s et "
                 f"{action['duration_max']:.2f}s (aléatoire)"
             )
 
-        return f"{prefix}⏱ Attendre {action['duration']:.2f}s"
+        return f"Attendre {action['duration']:.2f}s"
 
     if action_type == "move":
 
         return (
-            f"{prefix}🖱 Déplacer souris "
-            f"→ X:{action['x']} | Y:{action['y']} | "
+            f"Déplacer souris → X:{action['x']} | Y:{action['y']} | "
             f"Durée:{action['duration']:.2f}s"
         )
 
@@ -332,17 +590,14 @@ def describe_action(action, number=None):
         click_label = click_types.get(clicks, f"{clicks} clics")
 
         return (
-            f"{prefix}🖱 Clic "
-            f"{BUTTON_NAMES.get(action['button'], action['button'])} "
-            f"→ {click_label} "
-            f"à X:{action['x']} Y:{action['y']}"
+            f"Clic {BUTTON_NAMES.get(action['button'], action['button'])} "
+            f"→ {click_label} à X:{action['x']} Y:{action['y']}"
         )
 
     if action_type == "drag":
 
         return (
-            f"{prefix}🖱 Glisser "
-            f"{BUTTON_NAMES.get(action['button'], action['button'])} "
+            f"Glisser {BUTTON_NAMES.get(action['button'], action['button'])} "
             f"→ de X:{action['x']} Y:{action['y']} "
             f"à X:{action['x2']} Y:{action['y2']} "
             f"({action['duration']:.2f}s)"
@@ -358,7 +613,7 @@ def describe_action(action, number=None):
             position = f" à X:{action['x']} Y:{action['y']}"
 
         return (
-            f"{prefix}🖱 Molette vers le {direction} "
+            f"Molette vers le {direction} "
             f"({abs(action['amount'])} cran(s)){position}"
         )
 
@@ -369,7 +624,7 @@ def describe_action(action, number=None):
         if len(text) > 60:
             text = text[:57] + "..."
 
-        return f'{prefix}⌨ Écrire : "{text}"'
+        return f'Écrire : "{text}"'
 
     if action_type == "key":
 
@@ -382,18 +637,95 @@ def describe_action(action, number=None):
             KEY_NAMES.get(action["key"], action["key"]).upper()
         )
 
-        return f"{prefix}⌨ Appuyer : {' + '.join(parts)}"
+        return f"Appuyer : {' + '.join(parts)}"
 
     if action_type == "loop":
 
         inner = len(action.get("actions", []))
 
         return (
-            f"{prefix}🔁 Boucle × {action['repetitions']} "
-            f"({inner} action(s))"
+            f"Boucle × {action['repetitions']} ({inner} action(s))"
         )
 
-    return f"{prefix}Action inconnue"
+    if action_type == "condition":
+
+        return f"Si {describe_test(action.get('test', {}))}"
+
+    return "Action inconnue"
+
+
+def describe_test(test):
+    """Phrase décrivant le test d'une condition."""
+
+    kind = test.get("kind")
+
+    negate = test.get("negate", False)
+
+    if kind == "pixel":
+
+        color = tuple(test.get("color", (0, 0, 0)))
+
+        verb = "n'est pas" if negate else "est"
+
+        return (
+            f"la couleur du pixel X:{test['x']} Y:{test['y']} {verb} "
+            f"{rgb_to_hex(color)} (± {test.get('tolerance', 0)})"
+        )
+
+    if kind == "image":
+
+        verb = "n'est pas visible" if negate else "est visible"
+
+        name = os.path.basename(test.get("path", "")) or "image"
+
+        return f"l'image « {name} » {verb} à l'écran"
+
+    if kind == "window":
+
+        mode = test.get("mode", "contains")
+
+        if mode == "equals":
+            comparison = "n'est pas exactement" if negate else "est exactement"
+
+        else:
+            comparison = "ne contient pas" if negate else "contient"
+
+        return (
+            f"le titre de la fenêtre active {comparison} "
+            f"« {test.get('text', '')} »"
+        )
+
+    if kind == "chance":
+
+        percent = test.get("percent", 50)
+
+        if negate:
+            percent = 100 - percent
+
+        return f"le hasard tombe sur {percent} %"
+
+    return "test inconnu"
+
+
+def rgb_to_hex(color):
+
+    red, green, blue = (int(channel) for channel in color)
+
+    return f"#{red:02x}{green:02x}{blue:02x}"
+
+
+def hex_to_rgb(value):
+
+    value = value.strip().lstrip("#")
+
+    if len(value) != 6:
+        raise MacroError(f"Couleur invalide : {value!r}")
+
+    try:
+        return [int(value[index:index + 2], 16) for index in (0, 2, 4)]
+
+    except ValueError as error:
+        raise MacroError(f"Couleur invalide : {value!r}") from error
 
 
 # ==============================================================
@@ -470,6 +802,67 @@ def validate_actions(actions, _depth=0):
 
             validate_actions(action.get("actions", []), _depth + 1)
 
+        elif action_type == "condition":
+
+            validate_test(action.get("test"))
+
+            for branch in BRANCHES:
+                validate_actions(action.get(branch, []), _depth + 1)
+
+    return True
+
+
+def validate_test(test):
+    """Vérifie le test d'une condition. Lève MacroError."""
+
+    if not isinstance(test, dict):
+        raise MacroError("Condition sans test valide.")
+
+    kind = test.get("kind")
+
+    if kind not in TEST_KINDS:
+        raise MacroError(f"Type de test inconnu : {kind!r}")
+
+    if kind == "pixel":
+
+        _require(test, ["x", "y", "tolerance"], int)
+
+        color = test.get("color")
+
+        if (
+            not isinstance(color, (list, tuple))
+            or len(color) != 3
+            or not all(
+                isinstance(channel, int) and 0 <= channel <= 255
+                for channel in color
+            )
+        ):
+            raise MacroError("Couleur de test invalide.")
+
+        if not 0 <= test["tolerance"] <= 255:
+            raise MacroError("Tolérance hors limites (0 à 255).")
+
+    elif kind == "image":
+
+        _require(test, ["path"], str)
+
+        if not test["path"]:
+            raise MacroError("Aucune image sélectionnée pour le test.")
+
+    elif kind == "window":
+
+        _require(test, ["text"], str)
+
+        if test.get("mode") not in ("contains", "equals"):
+            raise MacroError("Mode de comparaison de titre inconnu.")
+
+    elif kind == "chance":
+
+        _require(test, ["percent"], int)
+
+        if not 0 <= test["percent"] <= 100:
+            raise MacroError("Probabilité hors limites (0 à 100 %).")
+
     return True
 
 
@@ -523,6 +916,24 @@ def check_coordinates(actions, screens):
                 action.get("actions", []),
                 screens,
             )
+
+            continue
+
+        if action.get("type") == "condition":
+
+            test = action.get("test", {})
+
+            if test.get("kind") == "pixel" and not point_on_any_screen(
+                test.get("x", 0), test.get("y", 0), screens
+            ):
+                problems.append(describe_action(action, index))
+
+            for branch in BRANCHES:
+
+                problems += check_coordinates(
+                    action.get(branch, []),
+                    screens,
+                )
 
             continue
 

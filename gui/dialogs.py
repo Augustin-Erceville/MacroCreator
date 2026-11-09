@@ -5,9 +5,17 @@ lui passer une action existante. `ActionDialog.run()` retourne l'action
 créée, ou None si l'utilisateur annule.
 """
 
+import os
+
 import pyautogui
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import (
+    QFileDialog,
+    QFrame,
+    QScrollArea,
+    QStackedWidget,
+    QWidget,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -30,6 +38,7 @@ from PySide6.QtWidgets import (
 from core import macro
 from core.recorder import STOP_KEY_NAME as RECORD_STOP_KEY
 from core.recorder import Recorder
+from gui import theme
 
 # Marge autorisée autour de l'écran pour les coordonnées
 COORDINATE_LIMIT = 20000
@@ -74,7 +83,7 @@ class MousePositionDialog(QDialog):
 
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        title.setStyleSheet("font-size: 16px; font-weight: bold;")
+        title.setObjectName("appTitle")
 
         layout.addWidget(title)
 
@@ -91,9 +100,7 @@ class MousePositionDialog(QDialog):
 
         self.position_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self.position_label.setStyleSheet(
-            "font-size: 26px; font-weight: bold; padding: 15px;"
-        )
+        self.position_label.setObjectName("countdown")
 
         layout.addWidget(self.position_label)
 
@@ -134,7 +141,7 @@ class MousePositionDialog(QDialog):
             )
 
             self.status_label.setStyleSheet(
-                "color: green; font-weight: bold;"
+                f"color: {theme.color('success')}; font-weight: bold;"
             )
 
             self.timer.stop()
@@ -665,7 +672,7 @@ class TextDialog(ActionDialog):
 
         note.setWordWrap(True)
 
-        note.setStyleSheet("color: gray;")
+        note.setObjectName("hint")
 
         self.layout.addWidget(note)
 
@@ -734,7 +741,7 @@ class KeyDialog(ActionDialog):
 
         example = QLabel("Exemple : CTRL coché + touche C = CTRL + C")
 
-        example.setStyleSheet("color: gray; padding: 8px;")
+        example.setObjectName("hint")
 
         self.layout.addWidget(example)
 
@@ -772,13 +779,13 @@ class LoopDialog(ActionDialog):
         self.layout.addLayout(form)
 
         hint = QLabel(
-            "Une boucle vide peut être créée puis remplie : sélectionnez-la "
-            "dans la liste, les actions ajoutées iront à l'intérieur."
+            "Une boucle vide peut être créée puis remplie : utilisez le "
+            "bouton « + » affiché à l'intérieur du bloc dans le canevas."
         )
 
         hint.setWordWrap(True)
 
-        hint.setStyleSheet("color: gray;")
+        hint.setObjectName("hint")
 
         self.layout.addWidget(hint)
 
@@ -827,7 +834,7 @@ class RecorderDialog(QDialog):
 
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        title.setStyleSheet("font-size: 16px; font-weight: bold;")
+        title.setObjectName("appTitle")
 
         layout.addWidget(title)
 
@@ -1013,6 +1020,512 @@ def ask_macro_name(parent, current=""):
     return name or None
 
 
+# ==============================================================
+# CONDITION
+# ==============================================================
+
+class ConditionDialog(ActionDialog):
+    """Construit le test d'une condition (branches conservées à l'édition)."""
+
+    title = "Condition"
+    width = 520
+
+    def build(self, action):
+
+        test = (action or {}).get("test", {}) or {}
+
+        kind = test.get("kind", "pixel")
+
+        intro = QLabel(
+            "La condition exécute la branche « Alors » si le test est "
+            "vrai, et la branche « Sinon » dans le cas contraire."
+        )
+
+        intro.setWordWrap(True)
+
+        intro.setObjectName("hint")
+
+        self.layout.addWidget(intro)
+
+        form = QFormLayout()
+
+        self.kind_input = QComboBox()
+
+        for value, label in (
+            ("pixel", "Couleur d'un pixel"),
+            ("image", "Image visible à l'écran"),
+            ("window", "Titre de la fenêtre active"),
+            ("chance", "Probabilité (hasard)"),
+        ):
+            self.kind_input.addItem(label, value)
+
+        index = self.kind_input.findData(kind)
+
+        if index >= 0:
+            self.kind_input.setCurrentIndex(index)
+
+        form.addRow("Tester :", self.kind_input)
+
+        self.layout.addLayout(form)
+
+        self.pages = QStackedWidget()
+
+        self.page_order = ["pixel", "image", "window", "chance"]
+
+        self.pages.addWidget(self._build_pixel_page(test))
+        self.pages.addWidget(self._build_image_page(test))
+        self.pages.addWidget(self._build_window_page(test))
+        self.pages.addWidget(self._build_chance_page(test))
+
+        self.pages.setCurrentIndex(self.page_order.index(kind))
+
+        self.kind_input.currentIndexChanged.connect(
+            lambda _index: self.pages.setCurrentIndex(
+                self.page_order.index(self.kind_input.currentData())
+            )
+        )
+
+        self.layout.addWidget(self.pages)
+
+        self.negate_check = QCheckBox(
+            "Inverser le test (« Alors » s'exécute quand il est faux)"
+        )
+
+        self.negate_check.setChecked(bool(test.get("negate")))
+
+        self.layout.addWidget(self.negate_check)
+
+    # ----------------------------------------------------------
+
+    def _build_pixel_page(self, test):
+
+        page = QWidget()
+
+        layout = QVBoxLayout(page)
+
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.pixel_coordinates = CoordinateGroup(
+            "Pixel à observer",
+            self,
+            test.get("x", 0) if test.get("kind") == "pixel" else 0,
+            test.get("y", 0) if test.get("kind") == "pixel" else 0,
+        )
+
+        layout.addWidget(self.pixel_coordinates)
+
+        colors = QHBoxLayout()
+
+        self.color_preview = QLabel()
+
+        self.color_preview.setFixedSize(QSize(34, 34))
+
+        self.pixel_color = (
+            list(test.get("color", (0, 0, 0)))
+            if test.get("kind") == "pixel"
+            else [0, 0, 0]
+        )
+
+        self.color_value = QLabel()
+
+        pick_button = QPushButton("Lire la couleur à cette position")
+
+        pick_button.clicked.connect(self._read_pixel_color)
+
+        colors.addWidget(self.color_preview)
+        colors.addWidget(self.color_value, 1)
+        colors.addWidget(pick_button)
+
+        layout.addLayout(colors)
+
+        self._refresh_color_preview()
+
+        form = QFormLayout()
+
+        self.tolerance_input = QSpinBox()
+        self.tolerance_input.setRange(0, 255)
+        self.tolerance_input.setValue(
+            test.get("tolerance", 10) if test.get("kind") == "pixel" else 10
+        )
+
+        form.addRow("Tolérance :", self.tolerance_input)
+
+        layout.addLayout(form)
+
+        note = QLabel(
+            "Une tolérance de 0 exige une couleur identique ; 10 à 30 "
+            "absorbe les variations d'affichage."
+        )
+
+        note.setWordWrap(True)
+
+        note.setObjectName("hint")
+
+        layout.addWidget(note)
+
+        return page
+
+    def _refresh_color_preview(self):
+
+        hexadecimal = macro.rgb_to_hex(self.pixel_color)
+
+        pixmap = QPixmap(34, 34)
+
+        pixmap.fill(QColor(hexadecimal))
+
+        self.color_preview.setPixmap(pixmap)
+
+        self.color_value.setText(
+            f"{hexadecimal}  ·  RVB {tuple(self.pixel_color)}"
+        )
+
+    def _read_pixel_color(self):
+
+        x = self.pixel_coordinates.x
+        y = self.pixel_coordinates.y
+
+        try:
+            found = pyautogui.pixel(x, y)
+
+        except Exception as error:  # noqa: BLE001 - capture indisponible
+
+            QMessageBox.warning(
+                self,
+                "Couleur du pixel",
+                f"Impossible de lire la couleur à cette position :\n{error}",
+            )
+
+            return
+
+        self.pixel_color = [found[0], found[1], found[2]]
+
+        self._refresh_color_preview()
+
+    def _build_image_page(self, test):
+
+        page = QWidget()
+
+        layout = QVBoxLayout(page)
+
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        row = QHBoxLayout()
+
+        self.image_input = QLineEdit(
+            test.get("path", "") if test.get("kind") == "image" else ""
+        )
+
+        self.image_input.setPlaceholderText(
+            "Fichier image à rechercher à l'écran (PNG recommandé)"
+        )
+
+        browse = QPushButton("Parcourir...")
+
+        browse.clicked.connect(self._browse_image)
+
+        row.addWidget(self.image_input, 1)
+        row.addWidget(browse)
+
+        layout.addLayout(row)
+
+        note = QLabel(
+            "La recherche est une correspondance exacte de pixels : "
+            "utilisez une capture non redimensionnée de l'élément. "
+            "Installer OpenCV (pip install opencv-python) permettrait une "
+            "recherche tolérante, mais ce n'est pas requis."
+        )
+
+        note.setWordWrap(True)
+
+        note.setObjectName("hint")
+
+        layout.addWidget(note)
+
+        return page
+
+    def _browse_image(self):
+
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Image à rechercher",
+            self.image_input.text() or macro.DATA_DIR,
+            "Images (*.png *.jpg *.jpeg *.bmp)",
+        )
+
+        if path:
+            self.image_input.setText(path)
+
+    def _build_window_page(self, test):
+
+        page = QWidget()
+
+        layout = QVBoxLayout(page)
+
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        form = QFormLayout()
+
+        self.window_mode = QComboBox()
+
+        self.window_mode.addItem("Contient", "contains")
+        self.window_mode.addItem("Est exactement", "equals")
+
+        if test.get("kind") == "window":
+
+            index = self.window_mode.findData(test.get("mode", "contains"))
+
+            if index >= 0:
+                self.window_mode.setCurrentIndex(index)
+
+        self.window_input = QLineEdit(
+            test.get("text", "") if test.get("kind") == "window" else ""
+        )
+
+        self.window_input.setPlaceholderText("Bloc-notes, Chrome, ...")
+
+        form.addRow("Comparaison :", self.window_mode)
+        form.addRow("Titre :", self.window_input)
+
+        layout.addLayout(form)
+
+        current = QLabel()
+
+        try:
+            title = pyautogui.getActiveWindowTitle() or ""
+
+        except Exception:  # noqa: BLE001 - titre indisponible
+            title = ""
+
+        current.setText(
+            f"Fenêtre active au moment de l'édition : « {title} »"
+        )
+
+        current.setWordWrap(True)
+
+        current.setObjectName("hint")
+
+        layout.addWidget(current)
+
+        return page
+
+    def _build_chance_page(self, test):
+
+        page = QWidget()
+
+        layout = QVBoxLayout(page)
+
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        form = QFormLayout()
+
+        self.chance_input = QSpinBox()
+        self.chance_input.setRange(0, 100)
+        self.chance_input.setSuffix(" %")
+        self.chance_input.setValue(
+            test.get("percent", 50) if test.get("kind") == "chance" else 50
+        )
+
+        form.addRow("Probabilité :", self.chance_input)
+
+        layout.addLayout(form)
+
+        note = QLabel(
+            "Utile pour rendre une macro moins régulière : à 70 %, la "
+            "branche « Alors » est empruntée environ 7 fois sur 10."
+        )
+
+        note.setWordWrap(True)
+
+        note.setObjectName("hint")
+
+        layout.addWidget(note)
+
+        return page
+
+    # ----------------------------------------------------------
+
+    def make_action(self):
+
+        kind = self.kind_input.currentData()
+
+        negate = self.negate_check.isChecked()
+
+        if kind == "pixel":
+
+            test = macro.make_pixel_test(
+                self.pixel_coordinates.x,
+                self.pixel_coordinates.y,
+                self.pixel_color,
+                self.tolerance_input.value(),
+                negate,
+            )
+
+        elif kind == "image":
+
+            path = self.image_input.text().strip()
+
+            if not path:
+                raise ValueError("Choisissez une image à rechercher.")
+
+            if not os.path.isfile(path):
+                raise ValueError("Ce fichier image est introuvable.")
+
+            test = macro.make_image_test(path, negate)
+
+        elif kind == "window":
+
+            text = self.window_input.text().strip()
+
+            if not text:
+                raise ValueError("Indiquez le titre à rechercher.")
+
+            test = macro.make_window_test(
+                text,
+                self.window_mode.currentData(),
+                negate,
+            )
+
+        else:
+
+            test = macro.make_chance_test(
+                self.chance_input.value(),
+                negate,
+            )
+
+        # À l'édition, les branches existantes sont conservées.
+        if self.action is not None:
+
+            updated = dict(self.action)
+
+            updated["test"] = test
+
+            return updated
+
+        return macro.make_condition(test)
+
+
+# ==============================================================
+# SELECTEUR DE BLOC
+# ==============================================================
+
+class BlockPicker(QDialog):
+    """Liste des types d'actions, façon palette de blocs."""
+
+    def __init__(self, parent=None):
+
+        super().__init__(parent)
+
+        self.setWindowTitle("Ajouter un bloc")
+
+        self.resize(460, 560)
+
+        self.chosen = None
+
+        layout = QVBoxLayout(self)
+
+        heading = QLabel("Quel bloc voulez-vous insérer ?")
+
+        heading.setObjectName("appTitle")
+
+        layout.addWidget(heading)
+
+        scroll = QScrollArea()
+
+        scroll.setWidgetResizable(True)
+
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        content = QWidget()
+
+        content_layout = QVBoxLayout(content)
+
+        content_layout.setContentsMargins(0, 0, 8, 0)
+
+        content_layout.setSpacing(8)
+
+        for action_type in macro.ACTION_TYPES:
+
+            content_layout.addWidget(self._build_entry(action_type))
+
+        content_layout.addStretch()
+
+        scroll.setWidget(content)
+
+        layout.addWidget(scroll, 1)
+
+        cancel = QPushButton("Annuler")
+
+        cancel.clicked.connect(self.reject)
+
+        layout.addWidget(cancel)
+
+    def _build_entry(self, action_type):
+
+        button = QPushButton()
+
+        button.setObjectName("picker")
+
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        button.clicked.connect(
+            lambda _checked=False, kind=action_type: self._choose(kind)
+        )
+
+        layout = QHBoxLayout(button)
+
+        layout.setContentsMargins(12, 10, 12, 10)
+
+        layout.setSpacing(12)
+
+        icon = QLabel()
+
+        icon.setPixmap(theme.action_icon(action_type).pixmap(28, 28))
+
+        icon.setFixedSize(28, 28)
+
+        layout.addWidget(icon)
+
+        texts = QVBoxLayout()
+
+        texts.setContentsMargins(0, 0, 0, 0)
+
+        texts.setSpacing(2)
+
+        title = QLabel(macro.ACTION_LABELS.get(action_type, action_type))
+
+        title.setObjectName("pickerTitle")
+
+        summary = QLabel(macro.ACTION_SUMMARIES.get(action_type, ""))
+
+        summary.setObjectName("pickerSummary")
+
+        summary.setWordWrap(True)
+
+        texts.addWidget(title)
+        texts.addWidget(summary)
+
+        layout.addLayout(texts, 1)
+
+        return button
+
+    def _choose(self, action_type):
+
+        self.chosen = action_type
+
+        self.accept()
+
+    @classmethod
+    def run(cls, parent):
+        """Retourne le type d'action choisi, ou None."""
+
+        dialog = cls(parent)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+
+        return dialog.chosen
+
+
 # Association type d'action -> dialogue
 ACTION_DIALOGS = {
     "wait": WaitDialog,
@@ -1023,4 +1536,5 @@ ACTION_DIALOGS = {
     "text": TextDialog,
     "key": KeyDialog,
     "loop": LoopDialog,
+    "condition": ConditionDialog,
 }

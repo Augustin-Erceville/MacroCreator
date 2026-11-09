@@ -28,7 +28,8 @@ if not getattr(sys, "frozen", False):
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from core import hotkeys, macro, recorder  # noqa: E402
+from core import conditions, hotkeys, macro, recorder  # noqa: E402
+from gui import theme  # noqa: E402
 from gui.main_window import MainWindow, describe_screens  # noqa: E402
 
 failures = []
@@ -118,12 +119,51 @@ def main():
     # --- interface et ecrans ---
     window = MainWindow()
 
-    window.refresh_tree()
+    window.actions = [
+        macro.make_wait(0.1),
+        macro.make_condition(
+            macro.make_chance_test(50),
+            [macro.make_click(1, 2)],
+            [macro.make_key("esc")],
+        ),
+    ]
+
+    window.refresh()
 
     check(
         "fenetre principale construite",
         bool(window.windowTitle()),
         window.windowTitle(),
+    )
+
+    check(
+        "canevas : blocs et branches construits",
+        len(window.canvas._blocks) == 4,
+        f"{len(window.canvas._blocks)} blocs (4 attendus)",
+    )
+
+    check(
+        "pictogrammes des blocs dessines",
+        not theme.action_icon("condition").isNull(),
+    )
+
+    check(
+        "evaluation des conditions (lecture de pixel)",
+        bool(conditions.evaluate(macro.make_chance_test(100)))
+        and not conditions.evaluate(macro.make_chance_test(0)),
+    )
+
+    try:
+        pixel_ok = isinstance(
+            conditions.evaluate(macro.make_pixel_test(5, 5, [0, 0, 0], 255)).value,
+            bool,
+        )
+    except Exception:  # noqa: BLE001
+        pixel_ok = False
+
+    check(
+        "capture d'ecran disponible (Pillow) pour les tests de pixel",
+        pixel_ok,
     )
 
     check("detection des ecrans", "écran" in describe_screens())

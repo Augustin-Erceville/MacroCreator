@@ -1,22 +1,33 @@
-"""Fenêtre principale de Macro Creator."""
+"""Fenêtre principale de Macro Creator.
+
+L'éditeur présente la macro comme un enchaînement de blocs reliés
+verticalement (voir `gui.flow`). Pendant l'exécution, le bloc en cours est
+mis en évidence et, s'il s'agit d'une attente, le temps restant avant
+l'action suivante est décompté.
+"""
 
 import copy
 import os
 import threading
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
+from PySide6.QtCore import QSettings, Qt, QTimer
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QGuiApplication,
+    QKeySequence,
+)
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
-    QGroupBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QSpinBox,
-    QTreeWidget,
-    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -24,7 +35,8 @@ from PySide6.QtWidgets import (
 from core import macro
 from core.executor import MacroWorker
 from core.hotkeys import STOP_KEY_NAME, GlobalHotkey
-from gui import dialogs
+from gui import dialogs, theme
+from gui.flow import FlowCanvas
 
 APPLICATION_NAME = "Macro Creator"
 
@@ -112,6 +124,24 @@ def describe_screens(screens=None):
     return f"{len(screens)} écrans détectés : {details}."
 
 
+def format_seconds(value):
+    """Durée lisible : « 0,8 s », « 12,4 s », « 1 min 05 »."""
+
+    if value >= 60:
+
+        minutes = int(value // 60)
+
+        seconds = value - minutes * 60
+
+        return f"{minutes} min {seconds:04.1f}".replace(".", ",")
+
+    return f"{value:.1f} s".replace(".", ",")
+
+
+# ==============================================================
+# FENETRE
+# ==============================================================
+
 class MainWindow(QMainWindow):
 
     def __init__(self):
@@ -134,15 +164,26 @@ class MainWindow(QMainWindow):
         self.countdown_timer = None
         self.countdown_value = 0
 
-        self.resize(1150, 780)
+        self.settings = QSettings("MacroCreator", "MacroCreator")
+
+        self.theme_name = self.settings.value(
+            "theme",
+            theme.DEFAULT_PALETTE,
+        )
+
+        theme.apply_theme(
+            QApplication.instance(),
+            self.theme_name,
+        )
+
+        self.resize(1240, 860)
 
         self.setup_ui()
         self.setup_menu()
         self.connect_signals()
         self.setup_hotkey()
 
-        self.refresh_tree()
-        self.update_title()
+        self.refresh()
 
     # ==========================================================
     # INTERFACE
@@ -156,169 +197,305 @@ class MainWindow(QMainWindow):
 
         main_layout = QVBoxLayout(central_widget)
 
-        title = QLabel("MACRO CREATOR")
+        main_layout.setContentsMargins(14, 12, 14, 12)
 
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main_layout.setSpacing(12)
 
-        title.setStyleSheet(
-            "font-size: 24px; font-weight: bold; padding: 10px;"
-        )
-
-        main_layout.addWidget(title)
+        main_layout.addWidget(self._build_header())
 
         content_layout = QHBoxLayout()
 
-        content_layout.addWidget(self._build_actions_panel(), 1)
-        content_layout.addWidget(self._build_macro_panel(), 3)
+        content_layout.setSpacing(12)
 
-        main_layout.addLayout(content_layout)
+        content_layout.addWidget(self._build_palette(), 0)
+        content_layout.addWidget(self._build_canvas_panel(), 1)
 
-        main_layout.addLayout(self._build_bottom_bar())
+        main_layout.addLayout(content_layout, 1)
+
+        main_layout.addWidget(self._build_execution_card())
 
         self.statusBar().showMessage("Prêt")
 
-    def _build_actions_panel(self):
+    def _build_header(self):
 
-        group = QGroupBox("Ajouter une action")
+        header = QFrame()
 
-        layout = QVBoxLayout(group)
+        header.setObjectName("header")
+
+        layout = QHBoxLayout(header)
+
+        layout.setContentsMargins(16, 10, 12, 10)
+
+        layout.setSpacing(12)
+
+        title = QLabel(APPLICATION_NAME)
+
+        title.setObjectName("appTitle")
+
+        layout.addWidget(title)
+
+        self.macro_label = QLabel()
+
+        self.macro_label.setObjectName("macroName")
+
+        layout.addWidget(self.macro_label)
+
+        layout.addStretch()
+
+        self.btn_new = QPushButton("Nouveau")
+        self.btn_load = QPushButton("Ouvrir")
+        self.btn_save = QPushButton("Enregistrer")
+
+        for button in (self.btn_new, self.btn_load, self.btn_save):
+
+            button.setObjectName("compact")
+
+            layout.addWidget(button)
+
+        return header
+
+    def _build_palette(self):
+
+        panel = QFrame()
+
+        panel.setObjectName("card")
+
+        panel.setFixedWidth(248)
+
+        layout = QVBoxLayout(panel)
+
+        layout.setContentsMargins(12, 12, 12, 12)
+
+        layout.setSpacing(8)
 
         self.btn_record = QPushButton("● Enregistrer mes gestes")
 
-        self.btn_record.setStyleSheet("font-weight: bold; padding: 6px;")
+        self.btn_record.setObjectName("record")
 
         layout.addWidget(self.btn_record)
 
-        separator = QLabel("— ou action par action —")
+        label = QLabel("BLOCS")
 
-        separator.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setObjectName("sectionTitle")
 
-        separator.setStyleSheet("color: gray; padding: 6px;")
-
-        layout.addWidget(separator)
+        layout.addWidget(label)
 
         self.action_buttons = {}
 
-        for action_type, label in (
-            ("wait", "⏱ Temps d'attente"),
-            ("move", "🖱 Mouvement souris"),
-            ("click", "🖱 Clic souris"),
-            ("drag", "🖱 Glisser-déposer"),
-            ("scroll", "🖱 Molette"),
-            ("text", "⌨ Inscription de texte"),
-            ("key", "⌨ Appui de touche"),
-            ("loop", "🔁 Boucle (vide)"),
-        ):
+        for action_type in macro.ACTION_TYPES:
 
-            button = QPushButton(label)
+            button = QPushButton(
+                f"  {macro.ACTION_LABELS.get(action_type, action_type)}"
+            )
+
+            button.setIcon(theme.action_icon(action_type))
+
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+
+            button.setToolTip(macro.ACTION_SUMMARIES.get(action_type, ""))
 
             layout.addWidget(button)
 
             self.action_buttons[action_type] = button
 
+        layout.addSpacing(6)
+
         self.insertion_label = QLabel()
 
-        self.insertion_label.setWordWrap(True)
+        self.insertion_label.setObjectName("hint")
 
-        self.insertion_label.setStyleSheet("color: gray; padding: 8px;")
+        self.insertion_label.setWordWrap(True)
 
         layout.addWidget(self.insertion_label)
 
         layout.addStretch()
 
-        return group
+        return panel
 
-    def _build_macro_panel(self):
+    def _build_canvas_panel(self):
 
-        group = QGroupBox("Actions de la macro")
+        panel = QWidget()
 
-        layout = QVBoxLayout(group)
+        layout = QVBoxLayout(panel)
 
-        self.macro_tree = QTreeWidget()
+        layout.setContentsMargins(0, 0, 0, 0)
 
-        self.macro_tree.setHeaderHidden(True)
+        layout.setSpacing(8)
 
-        self.macro_tree.setSelectionMode(
-            QTreeWidget.SelectionMode.ExtendedSelection
-        )
+        self.canvas = FlowCanvas()
 
-        self.macro_tree.setIndentation(22)
+        layout.addWidget(self.canvas, 1)
 
-        layout.addWidget(self.macro_tree)
+        toolbar = QHBoxLayout()
 
-        first_row = QHBoxLayout()
+        toolbar.setSpacing(6)
 
         self.btn_up = QPushButton("↑ Monter")
         self.btn_down = QPushButton("↓ Descendre")
         self.btn_edit = QPushButton("Modifier")
         self.btn_delete = QPushButton("Supprimer")
+        self.btn_copy = QPushButton("Copier")
+        self.btn_paste = QPushButton("Coller")
+        self.btn_group = QPushButton("Grouper en boucle")
+        self.btn_ungroup = QPushButton("Dégrouper")
 
-        for widget in (
+        for button in (
             self.btn_up,
             self.btn_down,
             self.btn_edit,
             self.btn_delete,
-        ):
-            first_row.addWidget(widget)
-
-        layout.addLayout(first_row)
-
-        second_row = QHBoxLayout()
-
-        self.btn_copy = QPushButton("Copier")
-        self.btn_paste = QPushButton("Coller")
-        self.btn_group = QPushButton("🔁 Grouper en boucle")
-        self.btn_ungroup = QPushButton("Dégrouper la boucle")
-
-        for widget in (
             self.btn_copy,
             self.btn_paste,
             self.btn_group,
             self.btn_ungroup,
         ):
-            second_row.addWidget(widget)
 
-        layout.addLayout(second_row)
+            button.setObjectName("compact")
 
-        return group
+            toolbar.addWidget(button)
 
-    def _build_bottom_bar(self):
+        layout.addLayout(toolbar)
 
-        layout = QHBoxLayout()
+        return panel
 
-        self.btn_new = QPushButton("Nouveau")
-        self.btn_save = QPushButton("Enregistrer")
-        self.btn_load = QPushButton("Charger")
+    def _build_execution_card(self):
 
-        for widget in (self.btn_new, self.btn_save, self.btn_load):
-            layout.addWidget(widget)
+        card = QFrame()
 
-        layout.addSpacing(20)
+        card.setObjectName("card")
 
-        layout.addWidget(QLabel("Démarrer dans :"))
+        layout = QHBoxLayout(card)
+
+        layout.setContentsMargins(16, 12, 16, 12)
+
+        layout.setSpacing(20)
+
+        # --- Action en cours ---
+
+        state = QVBoxLayout()
+
+        state.setSpacing(4)
+
+        state_title = QLabel("ACTION EN COURS")
+
+        state_title.setObjectName("sectionTitle")
+
+        state.addWidget(state_title)
+
+        current_row = QHBoxLayout()
+
+        current_row.setSpacing(10)
+
+        self.current_icon = QLabel()
+
+        self.current_icon.setFixedSize(26, 26)
+
+        current_row.addWidget(self.current_icon)
+
+        self.current_label = QLabel("Prêt")
+
+        self.current_label.setObjectName("currentAction")
+
+        current_row.addWidget(self.current_label, 1)
+
+        state.addLayout(current_row)
+
+        self.overall_progress = QProgressBar()
+
+        self.overall_progress.setTextVisible(False)
+
+        self.overall_progress.setFixedHeight(8)
+
+        state.addWidget(self.overall_progress)
+
+        self.step_label = QLabel()
+
+        self.step_label.setObjectName("stepCounter")
+
+        state.addWidget(self.step_label)
+
+        layout.addLayout(state, 1)
+
+        # --- Décompte de l'attente ---
+
+        self.countdown_panel = QWidget()
+
+        countdown_layout = QVBoxLayout(self.countdown_panel)
+
+        countdown_layout.setContentsMargins(0, 0, 0, 0)
+
+        countdown_layout.setSpacing(4)
+
+        countdown_title = QLabel("PROCHAINE ACTION DANS")
+
+        countdown_title.setObjectName("sectionTitle")
+
+        countdown_layout.addWidget(countdown_title)
+
+        self.countdown_label = QLabel("—")
+
+        self.countdown_label.setObjectName("countdown")
+
+        self.countdown_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        countdown_layout.addWidget(self.countdown_label)
+
+        self.wait_progress = QProgressBar()
+
+        self.wait_progress.setObjectName("wait")
+
+        self.wait_progress.setTextVisible(False)
+
+        self.wait_progress.setFixedHeight(8)
+
+        self.wait_progress.setFixedWidth(190)
+
+        countdown_layout.addWidget(self.wait_progress)
+
+        layout.addWidget(self.countdown_panel)
+
+        # --- Commandes ---
+
+        controls = QVBoxLayout()
+
+        controls.setSpacing(6)
+
+        delay_row = QHBoxLayout()
+
+        delay_row.setSpacing(6)
+
+        delay_row.addStretch()
+
+        delay_label = QLabel("Démarrer dans")
+
+        delay_label.setObjectName("hint")
+
+        delay_row.addWidget(delay_label)
 
         self.delay_input = QSpinBox()
+
         self.delay_input.setRange(0, 60)
         self.delay_input.setValue(DEFAULT_START_DELAY)
         self.delay_input.setSuffix(" s")
+        self.delay_input.setFixedWidth(78)
 
-        layout.addWidget(self.delay_input)
+        delay_row.addWidget(self.delay_input)
 
-        layout.addStretch()
+        controls.addLayout(delay_row)
 
-        self.execution_label = QLabel("Prêt")
+        self.btn_execute = QPushButton("▶  Exécuter")
 
-        self.execution_label.setStyleSheet("padding: 0 12px;")
+        self.btn_execute.setObjectName("primary")
 
-        layout.addWidget(self.execution_label)
+        self.btn_execute.setMinimumWidth(170)
 
-        self.btn_execute = QPushButton("▶ Exécuter")
+        self.btn_execute.setCursor(Qt.CursorShape.PointingHandCursor)
 
-        self.btn_execute.setStyleSheet("font-weight: bold; padding: 6px;")
+        controls.addWidget(self.btn_execute)
 
-        layout.addWidget(self.btn_execute)
+        layout.addLayout(controls)
 
-        return layout
+        return card
 
     def setup_menu(self):
 
@@ -356,17 +533,49 @@ class MainWindow(QMainWindow):
 
         edit_menu = self.menuBar().addMenu("&Édition")
 
-        self.act_copy = QAction("Copier l'action", self)
+        self.act_add = QAction("Ajouter un bloc...", self)
+        self.act_add.setShortcut(QKeySequence("Ctrl+B"))
+
+        self.act_copy = QAction("Copier le bloc", self)
         self.act_copy.setShortcut(QKeySequence.StandardKey.Copy)
 
-        self.act_paste = QAction("Coller l'action", self)
+        self.act_paste = QAction("Coller le bloc", self)
         self.act_paste.setShortcut(QKeySequence.StandardKey.Paste)
 
-        self.act_delete = QAction("Supprimer l'action", self)
+        self.act_delete = QAction("Supprimer le bloc", self)
         self.act_delete.setShortcut(QKeySequence.StandardKey.Delete)
 
-        for action in (self.act_copy, self.act_paste, self.act_delete):
+        for action in (
+            self.act_add,
+            self.act_copy,
+            self.act_paste,
+            self.act_delete,
+        ):
             edit_menu.addAction(action)
+
+        view_menu = self.menuBar().addMenu("&Affichage")
+
+        self.theme_group = QActionGroup(self)
+
+        self.theme_actions = {}
+
+        for name, label in (("dark", "Thème sombre"), ("light", "Thème clair")):
+
+            action = QAction(label, self)
+
+            action.setCheckable(True)
+
+            action.setChecked(name == self.theme_name)
+
+            action.triggered.connect(
+                lambda _checked=False, value=name: self.apply_theme(value)
+            )
+
+            self.theme_group.addAction(action)
+
+            view_menu.addAction(action)
+
+            self.theme_actions[name] = action
 
         run_menu = self.menuBar().addMenu("E&xécution")
 
@@ -404,20 +613,17 @@ class MainWindow(QMainWindow):
         self.btn_copy.clicked.connect(self.copy_selected_action)
         self.btn_paste.clicked.connect(self.paste_action)
         self.btn_group.clicked.connect(self.group_into_loop)
-        self.btn_ungroup.clicked.connect(self.ungroup_loop)
+        self.btn_ungroup.clicked.connect(self.ungroup_block)
 
         self.btn_new.clicked.connect(self.new_macro)
         self.btn_save.clicked.connect(self.save_macro)
         self.btn_load.clicked.connect(self.load_macro)
         self.btn_execute.clicked.connect(self.toggle_execution)
 
-        self.macro_tree.itemDoubleClicked.connect(
-            lambda *_: self.edit_selected_action()
-        )
-
-        self.macro_tree.itemSelectionChanged.connect(
-            self.update_insertion_hint
-        )
+        self.canvas.insert_requested.connect(self.insert_at)
+        self.canvas.edit_requested.connect(self.edit_path)
+        self.canvas.delete_requested.connect(self.delete_path)
+        self.canvas.selection_changed.connect(self.update_insertion_hint)
 
         self.act_new.triggered.connect(self.new_macro)
         self.act_open.triggered.connect(self.load_macro)
@@ -426,6 +632,7 @@ class MainWindow(QMainWindow):
         self.act_rename.triggered.connect(self.rename_macro)
         self.act_quit.triggered.connect(self.close)
 
+        self.act_add.triggered.connect(self.add_block_from_picker)
         self.act_copy.triggered.connect(self.copy_selected_action)
         self.act_paste.triggered.connect(self.paste_action)
         self.act_delete.triggered.connect(self.delete_selected_action)
@@ -461,96 +668,52 @@ class MainWindow(QMainWindow):
         if self.is_running:
             self.stop_macro()
 
+    def apply_theme(self, name):
+
+        self.theme_name = name
+
+        self.settings.setValue("theme", name)
+
+        theme.apply_theme(QApplication.instance(), name)
+
+        action = self.theme_actions.get(name)
+
+        if action is not None:
+            action.setChecked(True)
+
+        # Les pictogrammes sont redessinés avec la nouvelle palette.
+        for action_type, button in self.action_buttons.items():
+            button.setIcon(theme.action_icon(action_type))
+
+        self.canvas.rebuild()
+
     # ==========================================================
-    # ARBRE DES ACTIONS
+    # CANEVAS
     # ==========================================================
 
-    def refresh_tree(self, select_path=None):
+    def refresh(self, select_path=None):
+        """Reconstruit le canevas à partir du modèle."""
 
-        self.macro_tree.clear()
-
-        self._fill_tree(self.macro_tree.invisibleRootItem(), self.actions, [])
+        self.canvas.set_actions(self.actions)
 
         if select_path is not None:
-            self.select_path(select_path)
+            self.canvas.select_path(select_path)
 
         self.update_insertion_hint()
 
         self.update_title()
 
-    def _fill_tree(self, parent_item, actions, path):
-
-        for index, action in enumerate(actions):
-
-            item_path = path + [index]
-
-            item = QTreeWidgetItem(
-                parent_item,
-                [macro.describe_action(action, index + 1)],
-            )
-
-            item.setData(0, Qt.ItemDataRole.UserRole, item_path)
-
-            if action.get("type") == "loop":
-
-                self._fill_tree(item, action.get("actions", []), item_path)
-
-                item.setExpanded(True)
-
-    def item_for_path(self, path):
-
-        item = self.macro_tree.invisibleRootItem()
-
-        for step in path:
-
-            if step >= item.childCount():
-                return None
-
-            item = item.child(step)
-
-        return None if item is self.macro_tree.invisibleRootItem() else item
-
-    def select_path(self, path):
-
-        item = self.item_for_path(path)
-
-        if item is None:
-
-            if path and path[-1] > 0:
-                item = self.item_for_path(path[:-1] + [path[-1] - 1])
-
-            if item is None and len(path) > 1:
-                item = self.item_for_path(path[:-1])
-
-        if item is None:
-            return
-
-        self.macro_tree.setCurrentItem(item)
+        # Le nombre d'actions à exécuter suit les modifications du modèle.
+        if not self.is_running:
+            self.set_idle_state()
 
     def selected_path(self):
-        """Chemin de l'action sélectionnée, ou None."""
 
-        item = self.macro_tree.currentItem()
-
-        if item is None or not item.isSelected():
-            return None
-
-        path = item.data(0, Qt.ItemDataRole.UserRole)
-
-        return list(path) if path is not None else None
+        return self.canvas.selected_path()
 
     def selected_paths(self):
 
-        paths = []
-
-        for item in self.macro_tree.selectedItems():
-
-            path = item.data(0, Qt.ItemDataRole.UserRole)
-
-            if path is not None:
-                paths.append(list(path))
-
-        return sorted(paths)
+        return self.canvas.selected_paths()
 
     def update_insertion_hint(self):
 
@@ -559,35 +722,41 @@ class MainWindow(QMainWindow):
         if path is None:
 
             self.insertion_label.setText(
-                "Les nouvelles actions sont ajoutées à la fin de la macro."
+                "Aucun bloc sélectionné : un nouveau bloc est ajouté à la "
+                "fin. Utilisez « + » pour insérer à un endroit précis."
             )
 
             return
 
         action = macro.get_action(self.actions, path)
 
-        if action.get("type") == "loop":
-
-            self.insertion_label.setText(
-                "Boucle sélectionnée : les nouvelles actions seront "
-                "ajoutées à l'intérieur de la boucle."
-            )
-
-            return
+        label = macro.ACTION_LABELS.get(action.get("type"), "bloc")
 
         self.insertion_label.setText(
-            "Les nouvelles actions seront insérées juste après l'action "
-            "sélectionnée."
+            f"« {label} » sélectionné : un nouveau bloc sera inséré juste "
+            "après. Pour remplir une boucle ou une branche, utilisez le "
+            "« + » qu'elle contient."
         )
 
     # ==========================================================
     # AJOUT ET INSERTION
     # ==========================================================
 
-    def insert_actions(self, new_actions):
-        """Insère des actions au point courant et met à jour l'arbre."""
+    def block_execution_guard(self):
+        """Empêche toute modification pendant l'exécution."""
 
-        if not new_actions:
+        if self.is_running:
+
+            self.warn_running()
+
+            return True
+
+        return False
+
+    def insert_actions(self, new_actions):
+        """Insère des blocs après la sélection, ou à la fin de la macro."""
+
+        if not new_actions or self.block_execution_guard():
             return
 
         path = self.selected_path()
@@ -600,29 +769,71 @@ class MainWindow(QMainWindow):
 
         else:
 
-            action = macro.get_action(self.actions, path)
+            container, index = macro.get_container(self.actions, path)
 
-            if action.get("type") == "loop":
+            for offset, action in enumerate(new_actions, start=1):
+                container.insert(index + offset, action)
 
-                # Ajout à l'intérieur de la boucle sélectionnée
-                action["actions"].extend(new_actions)
-
-                target = path + [len(action["actions"]) - 1]
-
-            else:
-
-                container, index = macro.get_container(self.actions, path)
-
-                for offset, item in enumerate(new_actions, start=1):
-                    container.insert(index + offset, item)
-
-                target = path[:-1] + [index + len(new_actions)]
+            target = path[:-1] + [index + len(new_actions)]
 
         self.mark_modified()
 
-        self.refresh_tree(target)
+        self.refresh(target)
+
+    def insert_at(self, branch_path, index, new_actions=None):
+        """Insère à une position précise (bouton « + » du canevas)."""
+
+        if self.block_execution_guard():
+            return
+
+        if new_actions is None:
+
+            action_type = dialogs.BlockPicker.run(self)
+
+            if action_type is None:
+                return
+
+            action = dialogs.ACTION_DIALOGS[action_type].run(self)
+
+            if action is None:
+                return
+
+            new_actions = [action]
+
+        try:
+            container = macro.get_branch(self.actions, list(branch_path))
+
+        except macro.MacroError as error:
+
+            QMessageBox.warning(self, "Insertion", str(error))
+
+            return
+
+        for offset, action in enumerate(new_actions):
+            container.insert(index + offset, action)
+
+        self.mark_modified()
+
+        self.refresh(list(branch_path) + [index + len(new_actions) - 1])
+
+        self.statusBar().showMessage("Bloc inséré.", 3000)
+
+    def add_block_from_picker(self):
+
+        if self.block_execution_guard():
+            return
+
+        action_type = dialogs.BlockPicker.run(self)
+
+        if action_type is None:
+            return
+
+        self.add_action(action_type)
 
     def add_action(self, action_type):
+
+        if self.block_execution_guard():
+            return
 
         dialog_class = dialogs.ACTION_DIALOGS[action_type]
 
@@ -633,9 +844,12 @@ class MainWindow(QMainWindow):
 
         self.insert_actions([action])
 
-        self.statusBar().showMessage("Action ajoutée.", 3000)
+        self.statusBar().showMessage("Bloc ajouté.", 3000)
 
     def record_macro(self):
+
+        if self.block_execution_guard():
+            return
 
         recorded = dialogs.RecorderDialog.run(self)
 
@@ -652,17 +866,16 @@ class MainWindow(QMainWindow):
     # MODIFICATION
     # ==========================================================
 
-    def edit_selected_action(self):
+    def edit_path(self, path):
 
-        path = self.selected_path()
-
-        if path is None:
-
-            self.warn_no_selection("Modification")
-
+        if self.block_execution_guard():
             return
 
-        container, index = macro.get_container(self.actions, path)
+        try:
+            container, index = macro.get_container(self.actions, list(path))
+
+        except macro.MacroError:
+            return
 
         action = container[index]
 
@@ -680,7 +893,26 @@ class MainWindow(QMainWindow):
 
         self.mark_modified()
 
-        self.refresh_tree(path)
+        self.refresh(list(path))
+
+    def edit_selected_action(self):
+
+        path = self.selected_path()
+
+        if path is None:
+
+            self.warn_no_selection("Modification")
+
+            return
+
+        self.edit_path(path)
+
+    def delete_path(self, path):
+
+        if self.block_execution_guard():
+            return
+
+        self.delete_paths([list(path)])
 
     def delete_selected_action(self):
 
@@ -692,11 +924,28 @@ class MainWindow(QMainWindow):
 
             return
 
+        self.delete_paths(paths)
+
+    def delete_paths(self, paths):
+
+        if self.block_execution_guard():
+            return
+
+        contained = any(
+            macro.get_action(self.actions, path).get("type")
+            in macro.CONTAINER_TYPES
+            for path in paths
+        )
+
+        message = f"Voulez-vous vraiment supprimer {len(paths)} bloc(s) ?"
+
+        if contained:
+            message += "\nLe contenu des blocs supprimés sera perdu."
+
         answer = QMessageBox.question(
             self,
             "Supprimer",
-            f"Voulez-vous vraiment supprimer {len(paths)} action(s) ?\n"
-            "Le contenu des boucles supprimées sera perdu.",
+            message,
             QMessageBox.StandardButton.Yes
             | QMessageBox.StandardButton.No,
         )
@@ -705,20 +954,29 @@ class MainWindow(QMainWindow):
             return
 
         # Suppression de la fin vers le début : les index restent valides.
-        for path in sorted(paths, reverse=True):
+        for path in sorted(
+            paths,
+            key=lambda item: (
+                len(item),
+                [token for token in item if isinstance(token, int)],
+            ),
+            reverse=True,
+        ):
 
             try:
                 container, index = macro.get_container(self.actions, path)
 
             except macro.MacroError:
-                # Action déjà supprimée avec sa boucle parente.
+                # Bloc déjà supprimé avec son conteneur.
                 continue
 
             del container[index]
 
+        self.canvas.clear_selection()
+
         self.mark_modified()
 
-        self.refresh_tree(paths[0])
+        self.refresh()
 
     def move_action_up(self):
 
@@ -730,9 +988,15 @@ class MainWindow(QMainWindow):
 
     def _move_action(self, offset):
 
+        if self.block_execution_guard():
+            return
+
         path = self.selected_path()
 
         if path is None:
+
+            self.warn_no_selection("Déplacement")
+
             return
 
         container, index = macro.get_container(self.actions, path)
@@ -749,7 +1013,9 @@ class MainWindow(QMainWindow):
 
         self.mark_modified()
 
-        self.refresh_tree(path[:-1] + [target])
+        self.canvas.clear_selection()
+
+        self.refresh(path[:-1] + [target])
 
     def copy_selected_action(self):
 
@@ -765,7 +1031,7 @@ class MainWindow(QMainWindow):
             macro.get_action(self.actions, path)
         )
 
-        self.statusBar().showMessage("Action copiée.", 3000)
+        self.statusBar().showMessage("Bloc copié.", 3000)
 
     def paste_action(self):
 
@@ -774,20 +1040,23 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Coller",
-                "Aucune action n'a été copiée.",
+                "Aucun bloc n'a été copié.",
             )
 
             return
 
         self.insert_actions([copy.deepcopy(self.copied_action)])
 
-        self.statusBar().showMessage("Action collée.", 3000)
+        self.statusBar().showMessage("Bloc collé.", 3000)
 
     # ==========================================================
-    # BOUCLES
+    # BOUCLES ET CONDITIONS
     # ==========================================================
 
     def group_into_loop(self):
+
+        if self.block_execution_guard():
+            return
 
         paths = self.selected_paths()
 
@@ -796,8 +1065,8 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Boucle",
-                "Sélectionnez les actions à répéter "
-                "(Ctrl ou Maj pour en choisir plusieurs).",
+                "Sélectionnez les blocs à répéter "
+                "(Ctrl+clic pour en choisir plusieurs).",
             )
 
             return
@@ -809,8 +1078,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Boucle",
-                "Les actions sélectionnées doivent se trouver au même "
-                "niveau.",
+                "Les blocs sélectionnés doivent se trouver au même niveau.",
             )
 
             return
@@ -822,7 +1090,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Boucle",
-                "Les actions sélectionnées doivent être consécutives.",
+                "Les blocs sélectionnés doivent se suivre.",
             )
 
             return
@@ -840,11 +1108,17 @@ class MainWindow(QMainWindow):
 
         container[indexes[0]:indexes[-1] + 1] = [loop]
 
+        self.canvas.clear_selection()
+
         self.mark_modified()
 
-        self.refresh_tree(parent + [indexes[0]])
+        self.refresh(parent + [indexes[0]])
 
-    def ungroup_loop(self):
+    def ungroup_block(self):
+        """Remplace une boucle ou une condition par son contenu."""
+
+        if self.block_execution_guard():
+            return
 
         path = self.selected_path()
 
@@ -858,36 +1132,97 @@ class MainWindow(QMainWindow):
 
         action = container[index]
 
-        if action.get("type") != "loop":
+        action_type = action.get("type")
+
+        if action_type not in macro.CONTAINER_TYPES:
 
             QMessageBox.information(
                 self,
                 "Dégrouper",
-                "Sélectionnez une boucle.",
+                "Sélectionnez une boucle ou une condition.",
             )
 
             return
 
-        inner = action.get("actions", [])
+        if action_type == "loop":
 
-        container[index:index + 1] = copy.deepcopy(inner)
+            inner = copy.deepcopy(action.get("actions", []))
+
+            note = (
+                "Boucle dégroupée : les répétitions sont perdues, les "
+                "blocs sont conservés."
+            )
+
+        else:
+
+            branch = self.ask_branch_to_keep(action)
+
+            if branch is None:
+                return
+
+            inner = copy.deepcopy(action.get(branch, []))
+
+            note = (
+                f"Condition dégroupée : seule la branche "
+                f"« {macro.BRANCH_LABELS[branch]} » est conservée."
+            )
+
+        container[index:index + 1] = inner
+
+        self.canvas.clear_selection()
 
         self.mark_modified()
 
-        self.refresh_tree(path)
+        self.refresh()
 
-        self.statusBar().showMessage(
-            "Boucle dégroupée : les répétitions sont perdues, les actions "
-            "sont conservées.",
-            5000,
+        self.statusBar().showMessage(note, 6000)
+
+    def ask_branch_to_keep(self, action):
+        """Demande quelle branche conserver en dégroupant une condition."""
+
+        then_count = len(action.get("then", []))
+
+        else_count = len(action.get("else", []))
+
+        box = QMessageBox(self)
+
+        box.setWindowTitle("Dégrouper la condition")
+
+        box.setText(
+            "Dégrouper une condition ne garde qu'une seule branche.\n"
+            "Laquelle voulez-vous conserver ?"
         )
+
+        then_button = box.addButton(
+            f"Alors ({then_count} bloc(s))",
+            QMessageBox.ButtonRole.AcceptRole,
+        )
+
+        else_button = box.addButton(
+            f"Sinon ({else_count} bloc(s))",
+            QMessageBox.ButtonRole.AcceptRole,
+        )
+
+        box.addButton(QMessageBox.StandardButton.Cancel)
+
+        box.exec()
+
+        clicked = box.clickedButton()
+
+        if clicked is then_button:
+            return "then"
+
+        if clicked is else_button:
+            return "else"
+
+        return None
 
     def warn_no_selection(self, title):
 
         QMessageBox.information(
             self,
             title,
-            "Sélectionnez une action dans la liste.",
+            "Sélectionnez d'abord un bloc dans le canevas.",
         )
 
     # ==========================================================
@@ -913,6 +1248,12 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(
             f"{APPLICATION_NAME} — {self.macro_name} "
             f"({location}){marker}"
+        )
+
+        count = macro.count_actions(self.actions)
+
+        self.macro_label.setText(
+            f"{self.macro_name}{marker}  ·  {count} bloc(s)  ·  {location}"
         )
 
     def confirm_discard(self):
@@ -941,10 +1282,7 @@ class MainWindow(QMainWindow):
 
     def new_macro(self):
 
-        if self.is_running:
-
-            self.warn_running()
-
+        if self.block_execution_guard():
             return
 
         if not self.confirm_discard():
@@ -960,7 +1298,9 @@ class MainWindow(QMainWindow):
         self.current_path = None
         self.modified = False
 
-        self.refresh_tree()
+        self.canvas.clear_selection()
+
+        self.refresh()
 
         self.statusBar().showMessage("Nouvelle macro créée.", 3000)
 
@@ -1031,10 +1371,7 @@ class MainWindow(QMainWindow):
 
     def load_macro(self):
 
-        if self.is_running:
-
-            self.warn_running()
-
+        if self.block_execution_guard():
             return
 
         if not self.confirm_discard():
@@ -1066,10 +1403,12 @@ class MainWindow(QMainWindow):
         self.current_path = path
         self.modified = False
 
-        self.refresh_tree()
+        self.canvas.clear_selection()
+
+        self.refresh()
 
         self.statusBar().showMessage(
-            f"Macro chargée : {macro.count_actions(actions)} action(s).",
+            f"Macro chargée : {macro.count_actions(actions)} bloc(s).",
             5000,
         )
 
@@ -1097,7 +1436,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Exécution",
-                "La macro ne contient aucune action.",
+                "La macro ne contient aucun bloc.",
             )
 
             return
@@ -1116,9 +1455,15 @@ class MainWindow(QMainWindow):
 
         self.is_running = True
 
-        self.btn_execute.setText("■ Arrêter")
+        self.btn_execute.setText("■  Arrêter")
+
+        self.btn_execute.setObjectName("danger")
+
+        theme.repolish_widget(self.btn_execute)
 
         self.set_editing_enabled(False)
+
+        self.overall_progress.setValue(0)
 
         self.countdown_value = self.delay_input.value()
 
@@ -1128,7 +1473,7 @@ class MainWindow(QMainWindow):
 
             self.countdown_timer.timeout.connect(self._tick_countdown)
 
-            self._show_countdown()
+            self._show_start_countdown()
 
             self.countdown_timer.start(1000)
 
@@ -1137,7 +1482,7 @@ class MainWindow(QMainWindow):
         self._start_worker()
 
     def check_screen_coordinates(self):
-        """Prévient si des actions visent un point hors de tout écran.
+        """Prévient si des blocs visent un point hors de tout écran.
 
         En multi-écran, les coordonnées négatives sont normales : l'origine
         est le coin haut-gauche de l'écran principal, et un écran situé à
@@ -1160,7 +1505,7 @@ class MainWindow(QMainWindow):
             self,
             "Coordonnées hors écran",
             f"{describe_screens()}\n\n"
-            "Ces actions visent un point situé en dehors de tous les "
+            "Ces blocs visent un point situé en dehors de tous les "
             f"écrans :\n\n{preview}\n\nExécuter quand même ?",
             QMessageBox.StandardButton.Yes
             | QMessageBox.StandardButton.No,
@@ -1168,11 +1513,23 @@ class MainWindow(QMainWindow):
 
         return answer == QMessageBox.StandardButton.Yes
 
-    def _show_countdown(self):
+    # --- Compte à rebours avant démarrage ---
 
-        self.execution_label.setText(
-            f"Démarrage dans {self.countdown_value}s..."
-        )
+    def _show_start_countdown(self):
+
+        self.current_label.setText("Démarrage imminent")
+
+        self.current_icon.clear()
+
+        self.countdown_panel.setVisible(True)
+
+        self.countdown_label.setText(f"{self.countdown_value} s")
+
+        self.wait_progress.setRange(0, 100)
+
+        self.wait_progress.setValue(100)
+
+        self.step_label.setText("Placez-vous sur la bonne fenêtre")
 
     def _tick_countdown(self):
 
@@ -1180,7 +1537,7 @@ class MainWindow(QMainWindow):
 
         if self.countdown_value > 0:
 
-            self._show_countdown()
+            self._show_start_countdown()
 
             return
 
@@ -1196,16 +1553,25 @@ class MainWindow(QMainWindow):
 
             self.countdown_timer = None
 
+    # --- Worker ---
+
     def _start_worker(self):
 
         # Le worker est créé dans le thread graphique : « self.worker » est
         # donc toujours disponible pour une demande d'arrêt immédiate.
         self.worker = MacroWorker(copy.deepcopy(self.actions))
 
-        self.worker.status.connect(self.update_execution_status)
+        self.worker.action_started.connect(self.on_action_started)
+        self.worker.progress.connect(self.on_progress)
+        self.worker.wait_progress.connect(self.on_wait_progress)
+        self.worker.status.connect(self.on_status)
         self.worker.finished.connect(self.execution_finished)
 
-        self.execution_label.setText("Exécution...")
+        self.estimated = macro.has_conditions(self.actions)
+
+        self.current_label.setText("Exécution...")
+
+        self.countdown_panel.setVisible(False)
 
         self.worker_thread = threading.Thread(
             target=self.worker.run,
@@ -1214,9 +1580,56 @@ class MainWindow(QMainWindow):
 
         self.worker_thread.start()
 
-    def update_execution_status(self, message):
+    def on_action_started(self, path, action):
+        """Met en évidence le bloc courant et affiche son libellé."""
 
-        self.execution_label.setText(message)
+        self.canvas.set_running_path(path)
+
+        action_type = action.get("type")
+
+        self.current_icon.setPixmap(
+            theme.action_icon(action_type).pixmap(26, 26)
+        )
+
+        self.current_label.setText(macro.action_body(action))
+
+        # Le décompte n'a de sens que pour une attente ; il sera réaffiché
+        # par wait_progress dès la première mesure.
+        if action_type != "wait":
+            self.countdown_panel.setVisible(False)
+
+    def on_progress(self, done, total):
+
+        self.overall_progress.setRange(0, max(total, 1))
+
+        self.overall_progress.setValue(min(done, total))
+
+        prefix = "≈ " if getattr(self, "estimated", False) else ""
+
+        self.step_label.setText(f"{prefix}action {done} / {total}")
+
+    def on_wait_progress(self, remaining, total):
+        """Décompte avant l'action suivante, pendant une attente."""
+
+        if remaining <= 0:
+
+            self.countdown_panel.setVisible(False)
+
+            return
+
+        self.countdown_panel.setVisible(True)
+
+        self.countdown_label.setText(format_seconds(remaining))
+
+        self.wait_progress.setRange(0, 1000)
+
+        self.wait_progress.setValue(
+            int(1000 * remaining / total) if total > 0 else 0
+        )
+
+    def on_status(self, message):
+
+        self.statusBar().showMessage(message)
 
     def execution_finished(self, success, message):
 
@@ -1225,17 +1638,37 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.worker_thread = None
 
-        self.btn_execute.setText("▶ Exécuter")
+        self.btn_execute.setText("▶  Exécuter")
+
+        self.btn_execute.setObjectName("primary")
+
+        theme.repolish_widget(self.btn_execute)
 
         self.set_editing_enabled(True)
 
-        self.execution_label.setText("Prêt")
+        self.canvas.clear_running()
+
+        self.set_idle_state()
 
         if success:
             self.statusBar().showMessage(message, 5000)
 
         else:
             QMessageBox.warning(self, "Exécution", message)
+
+    def set_idle_state(self):
+
+        self.current_icon.clear()
+
+        self.current_label.setText("Prêt")
+
+        self.countdown_panel.setVisible(False)
+
+        self.overall_progress.setValue(0)
+
+        self.step_label.setText(
+            f"{macro.count_steps(self.actions)} action(s) à exécuter"
+        )
 
     def stop_macro(self):
 
@@ -1248,11 +1681,15 @@ class MainWindow(QMainWindow):
 
             self.is_running = False
 
-            self.btn_execute.setText("▶ Exécuter")
+            self.btn_execute.setText("▶  Exécuter")
+
+            self.btn_execute.setObjectName("primary")
+
+            theme.repolish_widget(self.btn_execute)
 
             self.set_editing_enabled(True)
 
-            self.execution_label.setText("Prêt")
+            self.set_idle_state()
 
             self.statusBar().showMessage("Démarrage annulé.", 3000)
 
@@ -1262,14 +1699,19 @@ class MainWindow(QMainWindow):
 
             self.worker.stop()
 
-            self.execution_label.setText("Arrêt demandé...")
+            self.current_label.setText("Arrêt demandé...")
 
     def set_editing_enabled(self, enabled):
-        """Verrouille l'édition pendant l'exécution."""
+        """Verrouille l'édition pendant l'exécution.
 
-        self.macro_tree.setEnabled(enabled)
+        Le canevas reste actif : c'est lui qui montre le bloc en cours.
+        Les modifications sont bloquées en amont par les boutons désactivés
+        et par `block_execution_guard`.
+        """
 
         self.btn_record.setEnabled(enabled)
+
+        self.delay_input.setEnabled(enabled)
 
         for button in self.action_buttons.values():
             button.setEnabled(enabled)
@@ -1294,7 +1736,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Exécution en cours",
-            "Arrêtez la macro en cours avant de continuer "
+            "Arrêtez la macro en cours avant de modifier la macro "
             f"({STOP_KEY_NAME}).",
         )
 
@@ -1322,7 +1764,10 @@ class MainWindow(QMainWindow):
 
         if self.is_running:
 
-            self.stop_macro()
+            if self.worker is not None:
+                self.worker.stop()
+
+            self.is_running = False
 
             if self.worker_thread is not None:
                 self.worker_thread.join(timeout=2.0)
